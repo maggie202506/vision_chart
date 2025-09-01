@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>视力表练习（提升裸眼视力）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: "Microsoft YaHei", Arial, sans-serif; background: #f8f8f8; margin: 0; }
+    #app { max-width: 700px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 18px #0001; padding: 24px; margin-top: 24px; min-height: 600px; }
+    .center { text-align: center; }
+    .main-btn { font-size: 22px; margin: 12px 6px; padding: 16px 28px; border-radius: 8px; border: none; background: #2b7ef7; color: #fff; cursor: pointer; }
+    .main-btn:hover { background: #1760b0; }
+    .nav-btn { margin: 6px; padding: 8px 18px; border-radius: 6px; border: 1px solid #bbb; background: #f3f3f3; color: #444; cursor: pointer; font-size: 17px;}
+    .nav-btn:hover { background: #e0eaff; }
+    .e-symbol { display: inline-block; background: #fff; }
+    .history-table { width:100%; border-collapse:collapse; margin-top:12px;}
+    .history-table th, .history-table td { border:1px solid #ddd; padding:6px 9px;}
+    .row { margin: 14px 0; }
+    .result-box { font-size: 23px; margin: 22px 0;}
+    .desc { color:#555; font-size:16px; margin:18px 0; }
+    .help-box { font-size: 17px; margin: 12px 0 0 0; line-height: 1.8; color:#333; }
+    h1,h2,h3 { font-family: inherit; }
+    .accuracy-bar { margin: 10px auto; display: block; width: 90%; height: 18px; background: #eee; border-radius: 8px; position: relative; }
+    .accuracy-progress { height: 100%; background: #2b7ef7; border-radius: 8px; }
+    .accuracy-label { position: absolute; left: 50%; top: -22px; transform: translateX(-50%); color: #1760b0; font-size: 16px; }
+    @media (max-width:700px) {
+      #app { max-width: 100%; border-radius:0; padding:9px; margin-top:0;}
+    }
+    @media (max-width:480px) {
+      .main-btn { font-size:18px; padding:12px 12px;}
+      .nav-btn { font-size:15px; padding:6px 10px;}
+    }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// 0.1~2.0标准视力等级
+const VISION_SCALES = [0.1,0.12,0.15,0.2,0.25,0.3,0.4,0.5,0.6,0.8,1.0,1.2,1.5,1.8,2.0];
+const E_DIRECTIONS = ['up','down','left','right'];
+const E_DIRECTION_LABELS = {'up':'↑','down':'↓','left':'←','right':'→'};
+const MM_TO_PX = 3.78;
+
+let appState = {
+  page: 'home',
+  testType: '',
+  selectedScale: null,
+  challengeScales: [],
+  currentStep: 0,
+  directions: [],
+  answers: [],
+  startTime: null,
+  remaining: null,
+  result: null,
+  history: JSON.parse(localStorage.getItem("visionTestHistory")||"[]"),
+  challengeOrder: [],
+  timerId: null,
+  tickInterval: 1000,
+  baseTestTotal: 30,
+  challengeTestTotal: 60
+};
+
+// 方向键支持
+document.addEventListener('keydown', function(e){
+  if(appState.page==='testing'){
+    let key = e.key;
+    let d = null;
+    if(key==='ArrowUp') d='up';
+    else if(key==='ArrowDown') d='down';
+    else if(key==='ArrowLeft') d='left';
+    else if(key==='ArrowRight') d='right';
+    if(d) answer(d);
+  }
+});
+
+function saveHistory() {
+  localStorage.setItem("visionTestHistory", JSON.stringify(appState.history));
+}
+
+function resetTest() {
+  appState.currentStep = 0;
+  appState.directions = [];
+  appState.answers = [];
+  appState.startTime = null;
+  appState.remaining = appState.testType==='base'?appState.baseTestTotal:appState.challengeTestTotal;
+  appState.challengeOrder = [];
+  clearTimeout(appState.timerId);
+}
+
+// 计时器
+function tickTimer() {
+  if(appState.page!=='testing') return;
+  appState.remaining--;
+  showPage();
+  if(appState.remaining>0){
+    appState.timerId = setTimeout(tickTimer, appState.tickInterval);
+  }else{
+    appState.page='result';
+    showPage();
+  }
+}
+
+// 实时正确率进度条
+function showAccuracyBar(accuracy) {
+  return `
+    <div class="accuracy-bar">
+      <div class="accuracy-progress" style="width:${accuracy}%;"></div>
+      <div class="accuracy-label">正确率：${accuracy}%</div>
+    </div>
+  `;
+}
+
+// 缺口方向算法
+function getEGapDirection(direction) {
+  // 标准三横一竖E，缺口方向 = 竖线的反方向
+  // direction为E缺口方向，用户按的方向需与之相同才正确
+  return direction;
+}
+
+function randomDirection() {
+  return E_DIRECTIONS[Math.floor(Math.random()*4)];
+}
+function getESizeMM(scale) {
+  let logValue = Math.log10(scale);
+  return 4.4 * Math.pow(10, logValue + 1);
+}
+function getESizePx(scale) {
+  let mm = getESizeMM(scale);
+  let px = mm * MM_TO_PX;
+  return Math.round(px);
+}
+
+// 画E字母SVG，标准三横一竖，缺口就是direction
+function renderE(direction, size) {
+  let rotate = {'up':0,'right':90,'down':180,'left':270}[direction];
+  return `
+    <svg class="e-symbol" width="${size}" height="${size}" style="transform:rotate(${rotate}deg);border:1px solid #aaa;">
+      <rect x="0" y="0" width="${size}" height="${size}" fill="#fff"/>
+      <rect x="0" y="0" width="${size/5}" height="${size}" fill="#222"/>
+      <rect x="0" y="0" width="${size}" height="${size/5}" fill="#222"/>
+      <rect x="0" y="${size/2-size/10}" width="${size}" height="${size/5}" fill="#222"/>
+      <rect x="0" y="${size-size/5}" width="${size}" height="${size/5}" fill="#222"/>
+    </svg>
+  `;
+}
+
+function getChallengeOrder(minScale) {
+  // 雾视挑战顺序：最小-0.1，最小-0.15，最小-0.2 ，循环
+  let arr = [minScale, 0.1, minScale, 0.15, minScale, 0.2];
+  let result = [];
+  while(result.length < appState.challengeTestTotal) {
+    result = result.concat(arr);
+  }
+  return result.slice(0, appState.challengeTestTotal);
+}
+
+function showPage() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  // 首页
+  if(appState.page==='home'){
+    let div = document.createElement('div');
+    div.innerHTML = `
+      <h1 class="center">视力表练习（提升裸眼视力）<br><small>0.1~2.0，5米标准视标</small></h1>
+      <div class="center row">
+        <button class="main-btn" onclick="changePage('base')">基准视力线</button>
+        <button class="main-btn" onclick="changePage('challenge')">雾视挑战</button>
+        <button class="main-btn" onclick="changePage('history')">历史战绩</button>
+        <button class="main-btn" onclick="changePage('help')">使用说明</button>
+      </div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+  // 基准视力线
+  if(appState.page==='base'){
+    let div = document.createElement('div');
+    div.innerHTML = `<h2 class="center">选择视力等级进行测定</h2>
+      <div class="center row">${VISION_SCALES.map(scale=>
+        `<button class="main-btn" onclick="startBaseTest(${scale})">${scale}</button>`
+      ).join('')}</div>
+      <div class="center row">
+        <button class="nav-btn" onclick="changePage('home')">返回首页</button>
+      </div>
+      <div class="desc">E字母尺寸为5米标准表，需与屏幕保持5米距离。</div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+  // 雾视挑战
+  if(appState.page==='challenge'){
+    let div = document.createElement('div');
+    div.innerHTML = `<h2 class="center">选择基准视标进行挑战</h2>
+      <div class="center row">${
+        VISION_SCALES.map((scale,idx)=>
+          `<button class="main-btn" onclick="startChallengeTest(${scale})">${scale}</button>`
+        ).join('')
+      }</div>
+      <div class="center row">
+        <button class="nav-btn" onclick="changePage('home')">返回首页</button>
+      </div>
+      <div class="desc">测试时距屏幕5米，交替出现基准视标和最大三行（0.1,0.15,0.2）。</div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+  // 测试页面
+  if(appState.page==='testing'){
+    let currScale, scaleArr;
+    if(appState.testType==='base'){
+      currScale = appState.selectedScale;
+    }else{
+      if(appState.challengeOrder.length === 0) {
+        appState.challengeOrder = getChallengeOrder(appState.selectedScale);
+      }
+      currScale = appState.challengeOrder[appState.currentStep];
+    }
+    let direction = appState.directions[appState.currentStep];
+    if(!direction) {
+      direction = randomDirection();
+      appState.directions[appState.currentStep] = direction;
+    }
+    let eSizePx = getESizePx(currScale);
+    // 计时启动
+    if(!appState.startTime){
+      appState.startTime = Date.now();
+      appState.timerId = setTimeout(tickTimer, appState.tickInterval);
+    }
+    // 实时正确率
+    let totalAnswered = appState.answers.filter(x=>typeof x==="string").length;
+    let correct = appState.answers.slice(0,appState.currentStep).filter((a,i)=>a===getEGapDirection(appState.directions[i])).length;
+    let accuracy = totalAnswered ? Math.round(100*correct/totalAnswered) : 0;
+
+    let div = document.createElement('div');
+    div.innerHTML = `
+      <h2 class="center">${appState.testType==='base'?"基准视力线测定":"雾视挑战"}<br>
+      <span style="font-size:16px">剩余时间：${appState.remaining}s</span></h2>
+      ${showAccuracyBar(accuracy)}
+      <div class="center" style="margin:20px 0;">
+        ${renderE(direction, eSizePx)}
+      </div>
+      <div class="center row">${E_DIRECTIONS.map(d=>
+        `<button class="main-btn" style="font-size:38px;" onclick="answer('${d}')">${E_DIRECTION_LABELS[d]}</button>`
+      ).join('')}</div>
+      <div class="center row"><span style="font-size:15px;color:#777;">可用方向键遥控器/键盘操作</span></div>
+      <div class="center row">
+        <button class="nav-btn" onclick="changePage('home')">返回首页</button>
+      </div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+  // 结果页
+  if(appState.page==='result'){
+    clearTimeout(appState.timerId);
+    let details = appState.answers.map((a,i)=>a===getEGapDirection(appState.directions[i]));
+    let correct = details.filter(x=>x).length;
+    let accuracy = Math.round(100*correct/appState.answers.length);
+    let div = document.createElement('div');
+    div.innerHTML = `
+      <h2 class="center">测试结果</h2>
+      ${showAccuracyBar(accuracy)}
+      <div class="center result-box">
+        ${appState.testType==='base'?'基准视力等级：'+appState.selectedScale:'挑战基准视力：'+appState.selectedScale}
+      </div>
+      <div class="center row">
+        <button class="main-btn" onclick="reTest()">重测</button>
+        ${appState.testType==='challenge'?
+          `<button class="main-btn" onclick="continueChallenge()">继续挑战</button>
+           <button class="main-btn" onclick="changePage('home')">返回首页</button>`
+          :`<button class="main-btn" onclick="changePage('home')">返回首页</button>`
+        }
+        <button class="nav-btn" onclick="changePage('history')">历史战绩&打印</button>
+      </div>
+    `;
+    let challengeOrderShow = appState.testType==='challenge'
+      ? getChallengeOrder(appState.selectedScale).slice(0,6).join(', ')
+      : appState.selectedScale;
+    let rec = {
+      date: new Date().toLocaleString(),
+      testType: appState.testType,
+      scale: appState.testType==='base'?[appState.selectedScale]:[challengeOrderShow],
+      accuracy,
+      answers: appState.answers,
+      directions: appState.directions,
+      time: appState.testType==='base'?appState.baseTestTotal:appState.challengeTestTotal
+    };
+    appState.history.push(rec);
+    saveHistory();
+    app.appendChild(div);
+    return;
+  }
+  // 历史战绩
+  if(appState.page==='history'){
+    let div = document.createElement('div');
+    div.innerHTML = `
+      <h2 class="center">历史战绩</h2>
+      <table class="history-table">
+        <tr><th>日期</th><th>类型</th><th>视标</th><th>准确率</th><th>时间(s)</th></tr>
+        ${appState.history.map(h=>
+          `<tr>
+            <td>${h.date}</td>
+            <td>${h.testType==='base'?'基准':'雾视挑战'}</td>
+            <td>${h.scale.join(', ')}</td>
+            <td>${h.accuracy}%</td>
+            <td>${h.time}</td>
+          </tr>`
+        ).join('')}
+      </table>
+      <div class="center row">
+        <button class="nav-btn" onclick="window.print()">打印</button>
+        <button class="nav-btn" onclick="changePage('home')">返回首页</button>
+      </div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+  // 使用说明
+  if(appState.page==='help'){
+    let div = document.createElement('div');
+    div.innerHTML = `
+      <h2 class="center">使用说明</h2>
+      <div class="help-box">
+        <h3>6米雾视法｜缓解视疲劳</h3>
+        <b>训练原理</b><br>
+        通过调整视距交替刺激睫状肌<br><br>
+        <b>跟练指南</b><br>
+        1. 基准定位：站在距视力表5米处, 找到自己能完全看清的那行视标。<br>
+        2. 雾视挑战：选择上一步测得的基准视标，后退至6米位置, 循环交替指认基准视标和最大三行的视标(0.1,0.15,0.2)。每日早晚各10分钟<br>
+        <span style="color:#c00">！！！注意：</span><br>
+        - 双眼视力差&gt;2行者，请遮盖弱势眼训练。<br>
+        - 当能轻松看清当前目标行，立即下移一行加大难度，始终保持轻微模糊感。<br>
+        <b>双眼视差训练周期：</b><br>
+        - DAY1-3：遮盖优势眼 20 min/day<br>
+        - DAY4：遮盖弱势眼30 min<br>
+        - DAY5-7：循环DAY1-3模式<br>
+        <b>安全须知</b><br>
+        1. 出现头晕/眼胀立即暂停<br>
+        2. 散光200度以上必须戴镜<br>
+        3. 训练后热敷眼周3分钟<br>
+        4. 配合20-20-20护眼法则<br>
+        <b>温馨Tips</b><br>
+        - 最佳时段:晨起 &amp; 放学后<br>
+        - 进阶版:加入动态追视卡<br>
+        - 饮食配合:补充叶黄素<br>
+        - 训练后做晶体操或看3D动画放松<br>
+        <b>安全中止信号 (家长必读!)</b><br>
+        1. 频繁揉眼/眨眼, 立即暂停<br>
+        2. 说"眼睛好酸", 改做晶体操<br>
+        3. 注意力涣散, 切换动态追视卡<br>
+        4. 头晕/恶心, 冷敷眼周+远眺，立即暂停<br>
+        <b>效果观测</b><br>
+        坚持15天左右对比, 裸眼视力表识别能力
+      </div>
+      <div class="center row">
+        <button class="nav-btn" onclick="changePage('home')">返回首页</button>
+      </div>
+    `;
+    app.appendChild(div);
+    return;
+  }
+}
+
+function changePage(p) {
+  appState.page = p;
+  if(p==='home') resetTest();
+  showPage();
+}
+function startBaseTest(scale) {
+  appState.page = 'testing';
+  appState.testType = 'base';
+  appState.selectedScale = scale;
+  resetTest();
+  showPage();
+}
+function startChallengeTest(minScale) {
+  appState.page = 'testing';
+  appState.testType = 'challenge';
+  appState.selectedScale = minScale;
+  resetTest();
+  showPage();
+}
+function answer(ans) {
+  appState.answers[appState.currentStep] = ans;
+  appState.currentStep++;
+  showPage();
+}
+function reTest() {
+  appState.page = appState.testType==='base'?'base':'challenge';
+  resetTest();
+  showPage();
+}
+function continueChallenge() {
+  appState.page = 'testing';
+  resetTest();
+  showPage();
+}
+
+// 启动
+showPage();
+</script>
+</body>
+</html>
